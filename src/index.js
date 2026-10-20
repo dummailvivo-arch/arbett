@@ -255,41 +255,96 @@ function findMatchClock(overviewText, teams) {
 }
 
 async function check(page) {
-  const liveListResponse = page.waitForResponse(
-    (response) => response.url().includes('/market-odds-live/v1/list-primary-markets'),
-    { timeout: 30_000 },
-  );
+  const liveListResponses = [];
+  const eventIds = new Set();
+  const collectLiveListResponse = (response) => {
+    if (response.url().includes('/market-odds-live/v1/list-primary-markets')) {
+      liveListResponses.push(response);
+      try {
+        const request = JSON.parse(response.request().postData() || '{}');
+        for (const eventId of request.eventIds || []) eventIds.add(eventId);
+      } catch {}
+    }
+  };
+  page.on('response', collectLiveListResponse);
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
   await page.waitForTimeout(4_000);
-  const liveList = await (await liveListResponse).json();
-  const eventIds = Object.keys(liveList?.data || {});
-  console.log(`[${new Date().toISOString()}] Discovered ${eventIds.length} live match page(s) from AR BET.`);
+  // AR BET loads matches in batches as the live list is scrolled. The first
+  // response only contains the initially visible batch.
+  let stableScrolls = 0;
+  let previousResponseCount = 0;
+  for (let attempt = 0; attempt < 12 && stableScrolls < 2; attempt += 1) {
+    await page.evaluate((step) => window.scrollTo(0, Math.min(
+      document.documentElement.scrollHeight,
+      window.scrollY + step,
+    )), 900);
+    await page.waitForTimeout(700);
+    for (const frame of page.frames()) {
+      try {
+        const hrefs = await frame.locator('a[href*="/live/soccer/"]').evaluateAll((anchors) =>
+          anchors.map((anchor) => anchor.href),
+        );
+        for (const href of hrefs) {
+          const match = new URL(href).pathname.match(/\/live\/soccer\/(\d+)\/?$/);
+          if (match) eventIds.add(`sr:match:${match[1]}`);
+        }
+      } catch {}
+    }
+    if (liveListResponses.length === previousResponseCount) {
+      stableScrolls += 1;
+    } else {
+      stableScrolls = 0;
+      previousResponseCount = liveListResponses.length;
+    }
+  }
+  page.off('response', collectLiveListResponse);
+
+  for (const response of liveListResponses) {
+    try {
+      const liveList = await response.json();
+      for (const eventId of Object.keys(liveList?.data || {})) eventIds.add(eventId);
+    } catch (error) {
+      console.warn(`[${new Date().toISOString()}] Could not read live match batch: ${error.message}`);
+    }
+  }
+  const discoveredEventIds = [...eventIds];
+  console.log(`[${new Date().toISOString()}] Discovered ${discoveredEventIds.length} live match page(s) from AR BET across ${liveListResponses.length} batch(es).`);
   const overviewText = await page.locator('body').innerText().catch(() => '');
   const markets = [];
-  const detailsRequest = Promise.all(eventIds.map(async (eventId) => {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8_000);
-      const response = await fetch('https://inr.arbet.club/api/bff/app/sport/data/market-odds-live/v1/details-page', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ eventId, sportId: 'sr:sport:1', pageNo: 1, pageSize: 200 }),
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-      return [eventId, await response.json()];
-    } catch {
-      return [eventId, null];
+  const detailsRequest = Promise.all(discoveredEventIds.map(async (eventId) => {
+    let lastError = 'unknown error';
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        const result = await page.evaluate(async ({ eventId: currentEventId }) => {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 15_000);
+          try {
+            const response = await fetch('/api/bff/app/sport/data/market-odds-live/v1/details-page', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ eventId: currentEventId, sportId: 'sr:sport:1', pageNo: 1, pageSize: 200 }),
+              signal: controller.signal,
+            });
+            const payload = await response.json();
+            return { ok: response.ok, payload, error: response.ok ? null : `HTTP ${response.status}` };
+          } finally {
+            clearTimeout(timeout);
+          }
+        }, { eventId });
+        if (!result.ok) throw new Error(result.error);
+        return [eventId, result.payload, null];
+      } catch (error) {
+        lastError = error.message;
+        if (attempt < 3) await page.waitForTimeout(500 * attempt);
+      }
     }
+    return [eventId, null, new Error(lastError)];
   }));
-  const detailsByEvent = await Promise.race([
-    detailsRequest,
-    new Promise((resolve) => setTimeout(() => resolve(eventIds.map((eventId) => [eventId, null])), 12_000)),
-  ]);
-  for (const [eventId, details] of detailsByEvent) {
+  const detailsByEvent = await detailsRequest;
+  for (const [eventId, details, error] of detailsByEvent) {
     const numericId = eventId.split(':').at(-1);
     if (!details?.data?.list) {
-      console.log(`[${new Date().toISOString()}] Skipping unavailable match ${numericId}.`);
+      console.warn(`[${new Date().toISOString()}] Could not load match ${numericId}: ${error?.message || 'details response had no market list'}.`);
       continue;
     }
     const candidates = matchDetailsToAlerts(details);
@@ -318,7 +373,7 @@ async function check(page) {
     await sendTelegram(message);
     alerts += 1;
   }
-  console.log(`[${new Date().toISOString()}] Scanned ${eventIds.length} live match page(s); found ${markets.length} target market(s); sent ${alerts} alert(s).`);
+  console.log(`[${new Date().toISOString()}] Scanned ${discoveredEventIds.length} live match page(s); found ${markets.length} target market(s); sent ${alerts} alert(s).`);
 }
 
 async function main() {
