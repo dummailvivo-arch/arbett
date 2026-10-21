@@ -39,5 +39,6 @@ This monitor checks AR BET's live soccer page every 45 seconds and sends a Teleg
 - Change `YES_RATE_THRESHOLD=40` or `CHECK_INTERVAL_SECONDS=45` in `.env` if desired.
 - Set `DRY_RUN=true` to verify the scanner without sending Telegram messages. Set it back to `false` to enable alerts.
 - Cookie, welcome, marketing, and notification popups are dismissed automatically before every scan. If a site popup changes substantially, run with `HEADLESS=false` to see it and share its wording or a screenshot so the rule can be extended.
+- The scanner follows AR BET's scrollable live-match panels and does not intentionally cap the number of matches. It stops after the list reaches the bottom and remains unchanged for several passes; the safety limit is 80 scroll passes.
 - If AR BET presents a CAPTCHA or requires a login, set `HEADLESS=false` for a visible browser window and complete it there; the site can also change its page layout, in which case the text parser in `src/index.js` may need a small update.
 - Never share `.env`; it contains the secret Telegram bot token.

@@ -192,6 +192,62 @@ async function findLiveMatchUrls(page) {
   return [...matchUrls];
 }
 
+async function collectVisibleEventIds(page, eventIds) {
+  for (const frame of page.frames()) {
+    try {
+      const cardEventIds = await frame.locator('[data-event-id]').evaluateAll((cards) =>
+        cards.map((card) => card.getAttribute('data-event-id')).filter(Boolean),
+      );
+      for (const eventId of cardEventIds) eventIds.add(eventId);
+      const hrefs = await frame.locator('a[href*="/live/soccer/"]').evaluateAll((anchors) =>
+        anchors.map((anchor) => anchor.href),
+      );
+      for (const href of hrefs) {
+        const match = new URL(href).pathname.match(/\/live\/soccer\/(\d+)\/?$/);
+        if (match) eventIds.add(`sr:match:${match[1]}`);
+      }
+      const html = await frame.content();
+      for (const match of html.matchAll(/\/live\/soccer\/(\d+)/g)) {
+        eventIds.add(`sr:match:${match[1]}`);
+      }
+    } catch {}
+  }
+}
+
+async function scrollLiveMatchLists(page) {
+  const scrollResult = await Promise.all(page.frames().map(async (frame) => {
+    try {
+      return await frame.evaluate(() => {
+        const candidates = [
+          document.scrollingElement,
+          ...document.querySelectorAll('*'),
+        ].filter((element, index, elements) =>
+          element
+          && elements.indexOf(element) === index
+          && element.scrollHeight > element.clientHeight + 20
+          && element.clientHeight > 100,
+        );
+        let changed = false;
+        let atBottom = true;
+        for (const element of candidates) {
+          const before = element.scrollTop;
+          const step = Math.max(element.clientHeight * 0.8, 500);
+          element.scrollTop = Math.min(element.scrollHeight, before + step);
+          changed ||= element.scrollTop > before;
+          atBottom &&= element.scrollTop + element.clientHeight >= element.scrollHeight - 5;
+        }
+        return { changed, atBottom };
+      });
+    } catch {
+      return { changed: false, atBottom: true };
+    }
+  }));
+  return {
+    changed: scrollResult.some((result) => result.changed),
+    atBottom: scrollResult.every((result) => result.atBottom),
+  };
+}
+
 async function sendTelegram(message) {
   if (process.env.DRY_RUN === 'true') {
     console.log(`DRY RUN — Telegram alert suppressed:\n${message}`);
@@ -257,46 +313,43 @@ function findMatchClock(overviewText, teams) {
 async function check(page) {
   const liveListResponses = [];
   const eventIds = new Set();
+  const collectLiveListRequest = (request) => {
+    if (!request.url().includes('/market-odds-live/v1/list-primary-markets')) return;
+    try {
+      const payload = JSON.parse(request.postData() || '{}');
+      for (const eventId of payload.eventIds || []) eventIds.add(eventId);
+    } catch {}
+  };
   const collectLiveListResponse = (response) => {
     if (response.url().includes('/market-odds-live/v1/list-primary-markets')) {
       liveListResponses.push(response);
-      try {
-        const request = JSON.parse(response.request().postData() || '{}');
-        for (const eventId of request.eventIds || []) eventIds.add(eventId);
-      } catch {}
     }
   };
+  page.on('request', collectLiveListRequest);
   page.on('response', collectLiveListResponse);
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await dismissPopups(page);
   await page.waitForTimeout(4_000);
-  // AR BET loads matches in batches as the live list is scrolled. The first
-  // response only contains the initially visible batch.
+  // AR BET loads matches lazily in a scrollable panel. Scroll every frame's
+  // scroll containers so discovery does not depend on the page-level window.
   let stableScrolls = 0;
-  let previousResponseCount = 0;
-  for (let attempt = 0; attempt < 12 && stableScrolls < 2; attempt += 1) {
-    await page.evaluate((step) => window.scrollTo(0, Math.min(
-      document.documentElement.scrollHeight,
-      window.scrollY + step,
-    )), 900);
-    await page.waitForTimeout(700);
-    for (const frame of page.frames()) {
-      try {
-        const hrefs = await frame.locator('a[href*="/live/soccer/"]').evaluateAll((anchors) =>
-          anchors.map((anchor) => anchor.href),
-        );
-        for (const href of hrefs) {
-          const match = new URL(href).pathname.match(/\/live\/soccer\/(\d+)\/?$/);
-          if (match) eventIds.add(`sr:match:${match[1]}`);
-        }
-      } catch {}
-    }
-    if (liveListResponses.length === previousResponseCount) {
+  let previousEventCount = eventIds.size;
+  for (let attempt = 0; attempt < 80 && stableScrolls < 3; attempt += 1) {
+    await collectVisibleEventIds(page, eventIds);
+    await page.mouse.wheel(0, 1_000);
+    const scrollState = await scrollLiveMatchLists(page);
+    // The next lazy-loaded batch can be requested shortly after the list
+    // reaches the bottom, so allow the request/response cycle to complete.
+    await page.waitForTimeout(1_500);
+    await collectVisibleEventIds(page, eventIds);
+    if (eventIds.size === previousEventCount && !scrollState.changed) {
       stableScrolls += 1;
     } else {
       stableScrolls = 0;
-      previousResponseCount = liveListResponses.length;
+      previousEventCount = eventIds.size;
     }
   }
+  page.off('request', collectLiveListRequest);
   page.off('response', collectLiveListResponse);
 
   for (const response of liveListResponses) {
