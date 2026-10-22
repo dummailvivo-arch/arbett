@@ -2,10 +2,12 @@
 
 This monitor checks AR BET's live soccer page every 45 seconds and sends a Telegram message whenever it sees a **"to score (incl. overtime)"** market whose **Yes rate is above 40%**. It remembers sent alerts, so it will not repeatedly message you for the same displayed rate.
 
-Each alert extracts the player name from the market and includes that player's
-Transfermarkt club-by-club matches and goals, totals, and profile link in the
-same Telegram message. If Transfermarkt is unavailable, the alert is still
-sent with an explicit lookup-unavailable notice.
+Each alert extracts the player name from the market. The alert is sent through
+the main bot, while the player's Transfermarkt club-by-club matches and goals,
+totals, and profile link are sent through an optional separate bot. A player's
+stats are sent only once per monitor process, even if the player appears in
+multiple alerts. If Transfermarkt is unavailable, the alert still sends and
+the stats bot retries that player on a later qualifying alert.
 
 ## Set up Telegram
 
@@ -47,6 +49,10 @@ sent with an explicit lookup-unavailable notice.
 - The scanner follows AR BET's scrollable live-match panels and does not intentionally cap the number of matches. It stops after the list reaches the bottom and remains unchanged for several passes; the safety limit is 80 scroll passes.
 - If AR BET presents a CAPTCHA or requires a login, set `HEADLESS=false` for a visible browser window and complete it there; the site can also change its page layout, in which case the text parser in `src/index.js` may need a small update.
 - Never share `.env`; it contains the secret Telegram bot token.
+- To enable the separate stats bot, add `TRANSFERMARKT_BOT_TOKEN` and
+  `TRANSFERMARKT_CHAT_ID` to `.env`. The chat ID may be comma-separated for
+  multiple destinations. The stats bot is optional; the monitor continues
+  sending main alerts if it is not configured.
 - Transfermarkt lookups use the same performance-data approach as the bot in
   [`player/bot.py`](./player/bot.py). Transfermarkt may rate-limit automated
   requests or change its frontend/API; in that case the market alert remains

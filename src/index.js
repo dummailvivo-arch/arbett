@@ -248,26 +248,32 @@ async function scrollLiveMatchLists(page) {
   };
 }
 
-async function sendTelegram(message) {
+async function sendTelegramMessage(token, chatIds, message, botLabel) {
   if (process.env.DRY_RUN === 'true') {
-    console.log(`DRY RUN — Telegram alert suppressed:\n${message}`);
+    console.log(`DRY RUN — ${botLabel} Telegram message suppressed:\n${message}`);
     return false;
   }
-  const chatIds = process.env.TELEGRAM_CHAT_ID.split(',').map((id) => id.trim()).filter(Boolean);
   for (const chatId of chatIds) {
-    const response = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, text: message, disable_web_page_preview: true }),
     });
     const result = await response.json();
-    if (!response.ok || !result.ok) throw new Error(`Telegram rejected the message for chat ${chatId}: ${JSON.stringify(result)}`);
+    if (!response.ok || !result.ok) throw new Error(`${botLabel} Telegram rejected the message for chat ${chatId}: ${JSON.stringify(result)}`);
   }
   return true;
 }
 
+async function sendTelegram(message) {
+  const chatIds = process.env.TELEGRAM_CHAT_ID.split(',').map((id) => id.trim()).filter(Boolean);
+  return sendTelegramMessage(process.env.TELEGRAM_BOT_TOKEN, chatIds, message, 'Alert bot');
+}
+
 const TRANSFERMARKT_BASE_URL = 'https://www.transfermarkt.com';
 const TRANSFERMARKT_API_URL = 'https://tmapi.transfermarkt.technology';
+const sentPlayerStats = new Set();
+const playerStatsInFlight = new Map();
 
 function normalizePlayerName(value) {
   return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
@@ -349,33 +355,72 @@ async function getTransfermarktInfo(name) {
   }));
   const appearances = clubs.reduce((sum, club) => sum + club.appearances, 0);
   const goals = clubs.reduce((sum, club) => sum + club.goals, 0);
+  return { player, clubs, appearances, goals };
+}
+
+function formatTransfermarktInfo(info) {
   return [
-    '',
-    `Transfermarkt: ${player.name}`,
-    ...clubs.map((club) => `- ${club.name}: ${club.appearances} matches, ${club.goals} goals`),
-    `Total Matches: ${appearances}`,
-    `Total Goals: ${goals}`,
-    `Profile: ${player.url}`,
+    `Transfermarkt: ${info.player.name}`,
+    ...info.clubs.map((club) => `- ${club.name}: ${club.appearances} matches, ${club.goals} goals`),
+    `Total Matches: ${info.appearances}`,
+    `Total Goals: ${info.goals}`,
+    `Profile: ${info.player.url}`,
   ].join('\n');
 }
 
-async function appendTransfermarktInfo(message, player) {
-  let timeoutId;
+async function sendPlayerStatsOnce(player) {
+  const key = normalizePlayerName(player);
+  if (sentPlayerStats.has(key)) return false;
+  if (playerStatsInFlight.has(key)) return playerStatsInFlight.get(key);
+
+  const task = (async () => {
+    const token = process.env.TRANSFERMARKT_BOT_TOKEN;
+    const chatIds = (process.env.TRANSFERMARKT_CHAT_ID || '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean);
+    if (!token || !chatIds.length) {
+      console.warn(`[${new Date().toISOString()}] Transfermarkt bot is not configured; stats were not sent for ${player}.`);
+      return false;
+    }
+
+    let timeoutId;
+    try {
+      const lookup = getTransfermarktInfo(player);
+      const info = await Promise.race([
+        lookup,
+        new Promise((_, reject) => {
+          timeoutId = setTimeout(() => reject(new Error('lookup timed out')), 15_000);
+        }),
+      ]);
+      await sendTelegramMessage(
+        token,
+        chatIds,
+        formatTransfermarktInfo(info),
+        'Transfermarkt stats bot',
+      );
+      sentPlayerStats.add(key);
+      return true;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.warn(`[${new Date().toISOString()}] Transfermarkt stats failed for ${player}: ${reason}`);
+      return false;
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+      playerStatsInFlight.delete(key);
+    }
+  })();
+  playerStatsInFlight.set(key, task);
+  return task;
+}
+
+async function sendAlertWithPlayerStats(message, player) {
   try {
-    const lookup = getTransfermarktInfo(player);
-    const transfermarktInfo = await Promise.race([
-      lookup,
-      new Promise((_, reject) => {
-        timeoutId = setTimeout(() => reject(new Error('lookup timed out')), 15_000);
-      }),
-    ]);
-    return `${message}\n${transfermarktInfo}`;
+    await sendTelegram(message);
+    if (player) await sendPlayerStatsOnce(player);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    console.warn(`[${new Date().toISOString()}] Transfermarkt lookup failed for ${player}: ${reason}`);
-    return `${message}\n\nTransfermarkt: information unavailable for ${player}.`;
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
+    console.warn(`[${new Date().toISOString()}] Alert delivery failed: ${reason}`);
   }
 }
 
@@ -537,7 +582,7 @@ async function check(page) {
       `Yes rate: ${market.yesRate} (above ${threshold})`,
       url,
     ].join('\n');
-    await sendTelegram(market.player ? await appendTransfermarktInfo(message, market.player) : message);
+    await sendAlertWithPlayerStats(message, market.player);
     alerts += 1;
   }
   console.log(`[${new Date().toISOString()}] Scanned ${discoveredEventIds.length} live match page(s); found ${markets.length} target market(s); sent ${alerts} alert(s).`);
