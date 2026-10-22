@@ -266,6 +266,119 @@ async function sendTelegram(message) {
   return true;
 }
 
+const TRANSFERMARKT_BASE_URL = 'https://www.transfermarkt.com';
+const TRANSFERMARKT_API_URL = 'https://tmapi.transfermarkt.technology';
+
+function normalizePlayerName(value) {
+  return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+
+async function transfermarktRequest(baseUrl, path) {
+  const response = await fetch(new URL(path, baseUrl), {
+    headers: {
+      'accept-language': 'en-US,en;q=0.9',
+      'user-agent': 'Mozilla/5.0 (compatible; ARBETFootballMonitor/1.0)',
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) throw new Error(`Transfermarkt returned HTTP ${response.status}`);
+  return response;
+}
+
+async function findTransfermarktPlayer(name) {
+  const response = await transfermarktRequest(
+    TRANSFERMARKT_BASE_URL,
+    `/schnellsuche/ergebnis/schnellsuche?query=${encodeURIComponent(name)}`,
+  );
+  const html = await response.text();
+  const candidates = [];
+  const linkPattern = /<a\b[^>]*href="([^"]*\/profil\/spieler\/[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+  for (const match of html.matchAll(linkPattern)) {
+    const label = match[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (label) candidates.push({ name: label, url: new URL(match[1], TRANSFERMARKT_BASE_URL).href });
+  }
+  const requested = normalizePlayerName(name);
+  const score = (candidate) => {
+    const candidateName = normalizePlayerName(candidate.name);
+    const requestedTokens = new Set(requested.split(/\s+/));
+    const commonTokens = candidateName.split(/\s+/).filter((token) => requestedTokens.has(token)).length;
+    let prefix = 0;
+    for (let index = 0; index < Math.min(requested.length, candidateName.length); index += 1) {
+      if (requested[index] !== candidateName[index]) break;
+      prefix += 1;
+    }
+    return commonTokens * 100 + prefix / Math.max(requested.length, candidateName.length);
+  };
+  const player = candidates.sort((left, right) => score(right) - score(left))[0];
+  if (!player || score(player) < 1) throw new Error(`No Transfermarkt player found for "${name}"`);
+  return player;
+}
+
+async function getTransfermarktInfo(name) {
+  const player = await findTransfermarktPlayer(name);
+  const playerId = player.url.match(/\/spieler\/(\d+)/)?.[1];
+  if (!playerId) throw new Error('Transfermarkt returned an invalid player profile');
+  const performanceResponse = await transfermarktRequest(
+    TRANSFERMARKT_API_URL,
+    `/player/${playerId}/performance-game`,
+  );
+  const performancePayload = await performanceResponse.json();
+  const records = performancePayload?.data?.performance;
+  if (!Array.isArray(records)) throw new Error('Transfermarkt returned no performance data');
+
+  const totals = new Map();
+  for (const record of records) {
+    const general = record?.clubsInformation && record?.statistics?.generalStatistics;
+    const goals = record?.statistics?.goalStatistics;
+    const club = record?.clubsInformation?.club;
+    if (!general || !goals || !club || (general.participationState !== undefined && general.participationState !== 'played')) continue;
+    const clubId = String(general.primaryClubId || club.clubId || '');
+    if (!clubId) continue;
+    const total = totals.get(clubId) || { appearances: 0, goals: 0, name: club.name || `Club ${clubId}` };
+    total.appearances += 1;
+    total.goals += Number(goals.goalsScoredTotalOfficial || goals.goalsScoredTotal || 0);
+    totals.set(clubId, total);
+  }
+  if (!totals.size) throw new Error('Transfermarkt returned no club totals');
+
+  const clubs = await Promise.all([...totals].map(async ([clubId, total]) => {
+    if (total.name !== `Club ${clubId}`) return total;
+    const clubResponse = await transfermarktRequest(TRANSFERMARKT_API_URL, `/club/${clubId}`);
+    const clubPayload = await clubResponse.json();
+    return { ...total, name: clubPayload?.data?.name || total.name };
+  }));
+  const appearances = clubs.reduce((sum, club) => sum + club.appearances, 0);
+  const goals = clubs.reduce((sum, club) => sum + club.goals, 0);
+  return [
+    '',
+    `Transfermarkt: ${player.name}`,
+    ...clubs.map((club) => `- ${club.name}: ${club.appearances} matches, ${club.goals} goals`),
+    `Total Matches: ${appearances}`,
+    `Total Goals: ${goals}`,
+    `Profile: ${player.url}`,
+  ].join('\n');
+}
+
+async function appendTransfermarktInfo(message, player) {
+  let timeoutId;
+  try {
+    const lookup = getTransfermarktInfo(player);
+    const transfermarktInfo = await Promise.race([
+      lookup,
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error('lookup timed out')), 15_000);
+      }),
+    ]);
+    return `${message}\n${transfermarktInfo}`;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`[${new Date().toISOString()}] Transfermarkt lookup failed for ${player}: ${reason}`);
+    return `${message}\n\nTransfermarkt: information unavailable for ${player}.`;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 function eventFromDetails(payload) {
   const markets = payload?.data?.list || [];
   const oneXTwo = markets.find((market) => market.marketName === '1x2');
@@ -282,8 +395,9 @@ function matchDetailsToAlerts(payload, fallbackLeague = 'Live soccer') {
     .filter((market) => /to\s+score\s*\(\s*incl\.?\s*overtime\s*\)/i.test(market.marketName || ''))
     .map((market) => {
       const yes = Object.values(market.outcomes || {}).find((outcome) => /^yes\b/i.test(outcome.name || ''));
+      const player = market.marketName.match(/^(.+?)\s+to\s+score\s*\(/i)?.[1]?.trim();
       return yes?.active && Number.isFinite(Number(yes.odds))
-        ? { event, league: fallbackLeague, market: market.marketName, yesRate: Number(yes.odds) }
+        ? { event, league: fallbackLeague, market: market.marketName, player, yesRate: Number(yes.odds) }
         : null;
     })
     .filter(Boolean);
@@ -423,7 +537,7 @@ async function check(page) {
       `Yes rate: ${market.yesRate} (above ${threshold})`,
       url,
     ].join('\n');
-    await sendTelegram(message);
+    await sendTelegram(market.player ? await appendTransfermarktInfo(message, market.player) : message);
     alerts += 1;
   }
   console.log(`[${new Date().toISOString()}] Scanned ${discoveredEventIds.length} live match page(s); found ${markets.length} target market(s); sent ${alerts} alert(s).`);

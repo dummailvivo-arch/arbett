@@ -2,6 +2,11 @@
 
 This monitor checks AR BET's live soccer page every 45 seconds and sends a Telegram message whenever it sees a **"to score (incl. overtime)"** market whose **Yes rate is above 40%**. It remembers sent alerts, so it will not repeatedly message you for the same displayed rate.
 
+Each alert extracts the player name from the market and includes that player's
+Transfermarkt club-by-club matches and goals, totals, and profile link in the
+same Telegram message. If Transfermarkt is unavailable, the alert is still
+sent with an explicit lookup-unavailable notice.
+
 ## Set up Telegram
 
 1. In Telegram, open **@BotFather**, send `/newbot`, and follow the prompts. Copy the bot token it gives you.
@@ -42,3 +47,7 @@ This monitor checks AR BET's live soccer page every 45 seconds and sends a Teleg
 - The scanner follows AR BET's scrollable live-match panels and does not intentionally cap the number of matches. It stops after the list reaches the bottom and remains unchanged for several passes; the safety limit is 80 scroll passes.
 - If AR BET presents a CAPTCHA or requires a login, set `HEADLESS=false` for a visible browser window and complete it there; the site can also change its page layout, in which case the text parser in `src/index.js` may need a small update.
 - Never share `.env`; it contains the secret Telegram bot token.
+- Transfermarkt lookups use the same performance-data approach as the bot in
+  [`player/bot.py`](./player/bot.py). Transfermarkt may rate-limit automated
+  requests or change its frontend/API; in that case the market alert remains
+  available and the message identifies the missing enrichment.
