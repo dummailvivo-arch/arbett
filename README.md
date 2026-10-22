@@ -54,6 +54,10 @@ the stats bot retries that player on a later qualifying alert.
   multiple destinations. The stats bot is optional; the monitor continues
   sending main alerts if it is not configured.
 - Transfermarkt lookups use the same performance-data approach as the bot in
-  [`player/bot.py`](./player/bot.py). Transfermarkt may rate-limit automated
-  requests or change its frontend/API; in that case the market alert remains
-  available and the message identifies the missing enrichment.
+  [`player/bot.py`](./player/bot.py). AR BET formats player names as
+  `Surname, Given name`, so the monitor tries both name orders. Player
+  discovery uses Transfermarkt's JSON quick-search API rather than relying
+  only on its WAF-protected HTML search. Transfermarkt may rate-limit
+  automated requests or present an anti-bot challenge; in that case the
+  market alert remains available and the log identifies the blocked
+  enrichment instead of reporting a misleading missing player.

@@ -72,7 +72,38 @@ class TransfermarktClient:
         return payload
 
     def find_player(self, name: str) -> tuple[str, str]:
-        candidates = self._search_candidates(name)
+        queries = [name]
+        parts = [part.strip() for part in name.split(",") if part.strip()]
+        if len(parts) == 2:
+            queries.append(f"{parts[1]} {parts[0]}")
+        queries.extend(token for token in name.split() if len(token) >= 4)
+        candidates: list[tuple[str, str]] = []
+        for query in dict.fromkeys(queries):
+            try:
+                search = self._get_json(
+                    f"/quick-search?term={quote_plus(query)}&page=1"
+                )
+                player_ids = (search.get("result") or {}).get("playerIds", [])
+                for player_id in player_ids[:10]:
+                    profile = self._get_json(f"/player/{player_id}")
+                    profile_name = profile.get("name")
+                    relative_url = profile.get("relativeUrl")
+                    if isinstance(profile_name, str) and isinstance(relative_url, str):
+                        candidates.append((profile_name, urljoin(BASE_URL, relative_url)))
+                if candidates:
+                    break
+            except TransfermarktError:
+                continue
+        blocked = False
+        for query in dict.fromkeys(queries):
+            if candidates:
+                break
+            try:
+                candidates.extend(self._search_candidates(query))
+            except TransfermarktError as exc:
+                blocked = blocked or "blocked" in str(exc).lower()
+            if candidates:
+                break
         requested = self._normalize_name(name)
 
         def score(candidate: tuple[str, str]) -> float:
@@ -86,11 +117,16 @@ class TransfermarktClient:
                 if len(token) >= 4:
                     candidates.extend(self._search_candidates(token))
         if not candidates:
+            if blocked:
+                raise TransfermarktError("Transfermarkt search was blocked by its anti-bot challenge.")
             raise TransfermarktError(f'No Transfermarkt player found for "{name}".')
         return max(candidates, key=score)
 
     def _search_candidates(self, query: str) -> list[tuple[str, str]]:
-        html = self._get(f"/schnellsuche/ergebnis/schnellsuche?query={quote_plus(query)}")
+        response = self._get_response(
+            f"/schnellsuche/ergebnis/schnellsuche?query={quote_plus(query)}"
+        )
+        html = response.content.decode("utf-8", errors="replace")
         soup = BeautifulSoup(html, "html.parser")
         candidates: list[tuple[str, str]] = []
         for link in soup.select('a[href*="/profil/spieler/"]'):
@@ -100,13 +136,25 @@ class TransfermarktClient:
                 candidates.append((label, urljoin(BASE_URL, href)))
         return candidates
 
+    def _get_response(self, path: str) -> requests.Response:
+        try:
+            response = self.session.get(urljoin(BASE_URL, path), timeout=self.timeout)
+            if response.status_code == 202:
+                raise TransfermarktError("Transfermarkt search was blocked by its anti-bot challenge.")
+            response.raise_for_status()
+        except TransfermarktError:
+            raise
+        except requests.RequestException as exc:
+            raise TransfermarktError("Transfermarkt could not be reached right now.") from exc
+        return response
+
     @staticmethod
     def _normalize_name(value: str) -> str:
         return "".join(
             character
             for character in unicodedata.normalize("NFKD", value.casefold())
             if not unicodedata.combining(character)
-        )
+        ).translate(str.maketrans({character: " " for character in ",.-"})).strip()
 
     def get_player_stats(self, name: str) -> PlayerResult:
         player_name, profile_url = self.find_player(name)

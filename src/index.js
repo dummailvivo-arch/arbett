@@ -276,14 +276,26 @@ const sentPlayerStats = new Set();
 const playerStatsInFlight = new Map();
 
 function normalizePlayerName(value) {
-  return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
+
+function playerNameQueries(name) {
+  const parts = name.split(',').map((part) => part.trim()).filter(Boolean);
+  const reordered = parts.length === 2 ? `${parts[1]} ${parts[0]}` : name;
+  return [...new Set([name, reordered, ...name.split(/\s+/).filter((part) => part.length >= 4)])];
 }
 
 async function transfermarktRequest(baseUrl, path) {
   const response = await fetch(new URL(path, baseUrl), {
     headers: {
+      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'accept-language': 'en-US,en;q=0.9',
-      'user-agent': 'Mozilla/5.0 (compatible; ARBETFootballMonitor/1.0)',
+      'user-agent': 'Mozilla/5.0',
     },
     signal: AbortSignal.timeout(15_000),
   });
@@ -291,17 +303,54 @@ async function transfermarktRequest(baseUrl, path) {
   return response;
 }
 
+async function transfermarktApiJson(path) {
+  const response = await transfermarktRequest(TRANSFERMARKT_API_URL, path);
+  const payload = await response.json();
+  if (!payload?.data) throw new Error('Transfermarkt returned an invalid API response');
+  return payload.data;
+}
+
 async function findTransfermarktPlayer(name) {
-  const response = await transfermarktRequest(
-    TRANSFERMARKT_BASE_URL,
-    `/schnellsuche/ergebnis/schnellsuche?query=${encodeURIComponent(name)}`,
-  );
-  const html = await response.text();
   const candidates = [];
-  const linkPattern = /<a\b[^>]*href="([^"]*\/profil\/spieler\/[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
-  for (const match of html.matchAll(linkPattern)) {
-    const label = match[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-    if (label) candidates.push({ name: label, url: new URL(match[1], TRANSFERMARKT_BASE_URL).href });
+  const searchQueries = playerNameQueries(name);
+  let apiError;
+  for (const query of searchQueries) {
+    try {
+      const search = await transfermarktApiJson(`/quick-search?term=${encodeURIComponent(query)}&page=1`);
+      const playerIds = search?.result?.playerIds;
+      if (!Array.isArray(playerIds)) continue;
+      const profiles = await Promise.all(playerIds.slice(0, 10).map(async (id) => {
+        const profile = await transfermarktApiJson(`/player/${id}`);
+        const profileName = profile?.name;
+        const relativeUrl = profile?.relativeUrl;
+        return profileName && relativeUrl
+          ? { name: profileName, url: new URL(relativeUrl, TRANSFERMARKT_BASE_URL).href }
+          : null;
+      }));
+      candidates.push(...profiles.filter(Boolean));
+      if (candidates.length) break;
+    } catch (error) {
+      apiError = error;
+    }
+  }
+  let wasBlocked = false;
+  for (const query of searchQueries) {
+    if (candidates.length) break;
+    try {
+      const response = await transfermarktRequest(
+        TRANSFERMARKT_BASE_URL,
+        `/schnellsuche/ergebnis/schnellsuche?query=${encodeURIComponent(query)}`,
+      );
+      const html = await response.text();
+      const linkPattern = /<a\b[^>]*href="([^"]*\/profil\/spieler\/[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+      for (const match of html.matchAll(linkPattern)) {
+        const label = match[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        if (label) candidates.push({ name: label, url: new URL(match[1], TRANSFERMARKT_BASE_URL).href });
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('HTTP 202')) wasBlocked = true;
+    }
+    if (candidates.length) break;
   }
   const requested = normalizePlayerName(name);
   const score = (candidate) => {
@@ -316,6 +365,13 @@ async function findTransfermarktPlayer(name) {
     return commonTokens * 100 + prefix / Math.max(requested.length, candidateName.length);
   };
   const player = candidates.sort((left, right) => score(right) - score(left))[0];
+  if (!player && wasBlocked) {
+    throw new Error('Transfermarkt search was blocked by its anti-bot challenge');
+  }
+  if (!player && apiError && candidates.length === 0) {
+    const reason = apiError instanceof Error ? apiError.message : String(apiError);
+    throw new Error(`Transfermarkt player search failed: ${reason}`);
+  }
   if (!player || score(player) < 1) throw new Error(`No Transfermarkt player found for "${name}"`);
   return player;
 }
