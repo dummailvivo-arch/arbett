@@ -6,8 +6,11 @@ Each alert extracts the player name from the market. The alert is sent through
 the main bot, while the player's Transfermarkt club-by-club matches and goals,
 totals, and profile link are sent through an optional separate bot. A player's
 stats are sent only once per monitor process, even if the player appears in
-multiple alerts. If Transfermarkt is unavailable, the alert still sends and
-the stats bot retries that player on a later qualifying alert.
+multiple alerts. After each new player stats message, the stats bot sends an
+updated session safety list sorted by goals per match, with lower values first.
+The list lasts for the monitor process session and starts over when the process
+restarts. If Transfermarkt is unavailable, the alert still sends and the stats
+bot retries that player on a later qualifying alert.
 
 ## Set up Telegram
 

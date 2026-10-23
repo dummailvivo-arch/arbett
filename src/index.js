@@ -274,6 +274,7 @@ const TRANSFERMARKT_BASE_URL = 'https://www.transfermarkt.com';
 const TRANSFERMARKT_API_URL = 'https://tmapi.transfermarkt.technology';
 const sentPlayerStats = new Set();
 const playerStatsInFlight = new Map();
+const sessionPlayers = new Map();
 
 function normalizePlayerName(value) {
   return value
@@ -424,6 +425,22 @@ function formatTransfermarktInfo(info) {
   ].join('\n');
 }
 
+function formatSessionPlayerList() {
+  const players = [...sessionPlayers.values()]
+    .sort((left, right) =>
+      left.goalsPerMatch - right.goalsPerMatch
+      || left.name.localeCompare(right.name),
+    );
+  return [
+    'Transfermarkt player safety list',
+    'Lower goals per match = safer',
+    ...players.map((player, index) =>
+      `${index + 1}. ${player.name} - Safe score: ${player.goalsPerMatch.toFixed(2)}`
+      + ` (goals per match: ${player.goalsPerMatch.toFixed(2)})`,
+    ),
+  ].join('\n');
+}
+
 async function sendPlayerStatsOnce(player) {
   const key = normalizePlayerName(player);
   if (sentPlayerStats.has(key)) return false;
@@ -456,6 +473,16 @@ async function sendPlayerStatsOnce(player) {
         'Transfermarkt stats bot',
       );
       sentPlayerStats.add(key);
+      sessionPlayers.set(key, {
+        name: info.player.name,
+        goalsPerMatch: info.appearances ? info.goals / info.appearances : 0,
+      });
+      await sendTelegramMessage(
+        token,
+        chatIds,
+        formatSessionPlayerList(),
+        'Transfermarkt safety list',
+      );
       return true;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
