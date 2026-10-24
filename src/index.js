@@ -90,6 +90,19 @@ async function openMarketList(page) {
   }
 }
 
+async function showAllSoccerMatches(page) {
+  for (const frame of page.frames()) {
+    try {
+      const toggle = frame.locator('button.sport-match-list-view-toggle').first();
+      if (!await toggle.isVisible({ timeout: 500 })) continue;
+      if (await toggle.getAttribute('aria-pressed') === 'true') return;
+      await toggle.evaluate((element) => element.click());
+      await page.waitForTimeout(2_000);
+      return;
+    } catch {}
+  }
+}
+
 /*
  * Extracts rendered market cards. AR BET can alter its markup; keeping this
  * text-based makes the selector resilient and easy to tune from a saved page.
@@ -441,9 +454,53 @@ function formatSessionPlayerList() {
   ].join('\n');
 }
 
-async function sendPlayerStatsOnce(player) {
+async function sendSessionPlayerList() {
+  const token = process.env.TRANSFERMARKT_BOT_TOKEN;
+  const chatIds = (process.env.TRANSFERMARKT_CHAT_ID || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+  if (!token || !chatIds.length) return false;
+  await sendTelegramMessage(
+    token,
+    chatIds,
+    formatSessionPlayerList(),
+    'Transfermarkt safety list',
+  );
+  return true;
+}
+
+function updateSessionPlayers(activeMarkets, liveEventIds) {
+  const activePlayers = new Map();
+  for (const market of activeMarkets) {
+    if (!market.player) continue;
+    const key = normalizePlayerName(market.player);
+    const eventIds = activePlayers.get(key) || new Set();
+    eventIds.add(market.eventId);
+    activePlayers.set(key, eventIds);
+  }
+
+  let changed = false;
+  for (const [key, player] of sessionPlayers) {
+    const eventIds = activePlayers.get(key);
+    const stillActive = eventIds && [...eventIds].some((eventId) => liveEventIds.has(eventId));
+    if (!stillActive) {
+      sessionPlayers.delete(key);
+      changed = true;
+      continue;
+    }
+    player.eventIds = eventIds;
+  }
+  return changed;
+}
+
+async function sendPlayerStatsOnce(player, eventId) {
   const key = normalizePlayerName(player);
-  if (sentPlayerStats.has(key)) return false;
+  if (sentPlayerStats.has(key)) {
+    const existing = sessionPlayers.get(key);
+    if (existing && eventId) existing.eventIds.add(eventId);
+    return false;
+  }
   if (playerStatsInFlight.has(key)) return playerStatsInFlight.get(key);
 
   const task = (async () => {
@@ -476,13 +533,9 @@ async function sendPlayerStatsOnce(player) {
       sessionPlayers.set(key, {
         name: info.player.name,
         goalsPerMatch: info.appearances ? info.goals / info.appearances : 0,
+        eventIds: eventId ? new Set([eventId]) : new Set(),
       });
-      await sendTelegramMessage(
-        token,
-        chatIds,
-        formatSessionPlayerList(),
-        'Transfermarkt safety list',
-      );
+      await sendSessionPlayerList();
       return true;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -497,10 +550,10 @@ async function sendPlayerStatsOnce(player) {
   return task;
 }
 
-async function sendAlertWithPlayerStats(message, player) {
+async function sendAlertWithPlayerStats(message, player, eventId) {
   try {
     await sendTelegram(message);
-    if (player) await sendPlayerStatsOnce(player);
+    if (player) await sendPlayerStatsOnce(player, eventId);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     console.warn(`[${new Date().toISOString()}] Alert delivery failed: ${reason}`);
@@ -553,7 +606,7 @@ function findMatchClock(overviewText, teams) {
 }
 
 async function check(page) {
-  const liveListResponses = [];
+  const liveListPayloads = [];
   const eventIds = new Set();
   const collectLiveListRequest = (request) => {
     if (!request.url().includes('/market-odds-live/v1/list-primary-markets')) return;
@@ -564,7 +617,13 @@ async function check(page) {
   };
   const collectLiveListResponse = (response) => {
     if (response.url().includes('/market-odds-live/v1/list-primary-markets')) {
-      liveListResponses.push(response);
+      // Read the body while it is still attached to the current page
+      // lifecycle. Keeping Response objects until after scrolling can make
+      // Playwright lose access when the SPA refreshes the list.
+      liveListPayloads.push(response.json().catch((error) => {
+        console.warn(`[${new Date().toISOString()}] Could not read live match batch: ${error.message}`);
+        return null;
+      }));
     }
   };
   page.on('request', collectLiveListRequest);
@@ -572,6 +631,9 @@ async function check(page) {
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
   await dismissPopups(page);
   await page.waitForTimeout(4_000);
+  // The default match-row view only requests the highlighted live matches.
+  // The list/tournament view requests the remaining Soccer matches as well.
+  await showAllSoccerMatches(page);
   // AR BET loads matches lazily in a scrollable panel. Scroll every frame's
   // scroll containers so discovery does not depend on the page-level window.
   let stableScrolls = 0;
@@ -594,17 +656,17 @@ async function check(page) {
   page.off('request', collectLiveListRequest);
   page.off('response', collectLiveListResponse);
 
-  for (const response of liveListResponses) {
-    try {
-      const liveList = await response.json();
-      for (const eventId of Object.keys(liveList?.data || {})) eventIds.add(eventId);
-    } catch (error) {
-      console.warn(`[${new Date().toISOString()}] Could not read live match batch: ${error.message}`);
-    }
+  const liveListBatches = await Promise.all(liveListPayloads);
+  for (const liveList of liveListBatches) {
+    for (const eventId of Object.keys(liveList?.data || {})) eventIds.add(eventId);
   }
   const discoveredEventIds = [...eventIds];
-  console.log(`[${new Date().toISOString()}] Discovered ${discoveredEventIds.length} live match page(s) from AR BET across ${liveListResponses.length} batch(es).`);
+  console.log(`[${new Date().toISOString()}] Discovered ${discoveredEventIds.length} live match page(s) from AR BET across ${liveListPayloads.length} batch(es).`);
   const overviewText = await page.locator('body').innerText().catch(() => '');
+  const soccerCount = overviewText.match(/\bSoccer\s*\((\d+)\)/i)?.[1];
+  if (soccerCount && Number(soccerCount) > discoveredEventIds.length) {
+    console.warn(`[${new Date().toISOString()}] AR BET reports ${soccerCount} live soccer matches, but only ${discoveredEventIds.length} event ID(s) were exposed by the page. The site may be showing only its Hot-match panel.`);
+  }
   const markets = [];
   const detailsRequest = Promise.all(discoveredEventIds.map(async (eventId) => {
     let lastError = 'unknown error';
@@ -647,10 +709,23 @@ async function check(page) {
     const teams = event.split(' vs ');
     const league = findLeague(overviewText, teams);
     const gameTime = findMatchClock(overviewText, teams);
-    const namedCandidates = candidates.map((candidate) => ({ ...candidate, league, gameTime }));
+    const namedCandidates = candidates.map((candidate) => ({
+      ...candidate,
+      eventId,
+      league,
+      gameTime,
+    }));
     const display = namedCandidates[0]?.event || event || `Match ${numericId}`;
     console.log(`[${new Date().toISOString()}] Scanning: ${league} — ${display} (${gameTime})`);
     markets.push(...namedCandidates);
+  }
+  if (updateSessionPlayers(markets, new Set(discoveredEventIds))) {
+    try {
+      await sendSessionPlayerList();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.warn(`[${new Date().toISOString()}] Updated Transfermarkt safety list failed: ${reason}`);
+    }
   }
   let alerts = 0;
 
@@ -665,7 +740,7 @@ async function check(page) {
       `Yes rate: ${market.yesRate} (above ${threshold})`,
       url,
     ].join('\n');
-    await sendAlertWithPlayerStats(message, market.player);
+    await sendAlertWithPlayerStats(message, market.player, market.eventId);
     alerts += 1;
   }
   console.log(`[${new Date().toISOString()}] Scanned ${discoveredEventIds.length} live match page(s); found ${markets.length} target market(s); sent ${alerts} alert(s).`);

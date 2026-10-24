@@ -8,6 +8,8 @@ totals, and profile link are sent through an optional separate bot. A player's
 stats are sent only once per monitor process, even if the player appears in
 multiple alerts. After each new player stats message, the stats bot sends an
 updated session safety list sorted by goals per match, with lower values first.
+When a live match ends or its target player market disappears, that player's
+entry is removed from the list and the updated list is sent.
 The list lasts for the monitor process session and starts over when the process
 restarts. If Transfermarkt is unavailable, the alert still sends and the stats
 bot retries that player on a later qualifying alert.
@@ -49,7 +51,7 @@ bot retries that player on a later qualifying alert.
 - Change `YES_RATE_THRESHOLD=40` or `CHECK_INTERVAL_SECONDS=45` in `.env` if desired.
 - Set `DRY_RUN=true` to verify the scanner without sending Telegram messages. Set it back to `false` to enable alerts.
 - Cookie, welcome, marketing, and notification popups are dismissed automatically before every scan. If a site popup changes substantially, run with `HEADLESS=false` to see it and share its wording or a screenshot so the rule can be extended.
-- The scanner follows AR BET's scrollable live-match panels and does not intentionally cap the number of matches. It stops after the list reaches the bottom and remains unchanged for several passes; the safety limit is 80 scroll passes.
+- The scanner switches AR BET's Soccer page to its tournament/list view before following the scrollable live-match panels. This is required because the default match-row view exposes only the highlighted matches. It does not intentionally cap the number of matches and stops after the list reaches the bottom and remains unchanged for several passes; the safety limit is 80 scroll passes.
 - If AR BET presents a CAPTCHA or requires a login, set `HEADLESS=false` for a visible browser window and complete it there; the site can also change its page layout, in which case the text parser in `src/index.js` may need a small update.
 - Never share `.env`; it contains the secret Telegram bot token.
 - To enable the separate stats bot, add `TRANSFERMARKT_BOT_TOKEN` and
