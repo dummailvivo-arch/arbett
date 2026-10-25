@@ -3,86 +3,168 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="AR BET live soccer score alert monitor">
-    <title>AR BET Live Score Alert</title>
+    <meta name="description" content="AR BET live player scoring dashboard">
+    <title>AR BET · Live dashboard</title>
     <style>
       :root {
         color-scheme: dark;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: #0b1020;
-        color: #eef2ff;
+        --bg: #050505;
+        --panel: #111111;
+        --panel-raised: #171717;
+        --line: #292929;
+        --muted: #8d8d8d;
+        --text: #ededed;
+        --cyan: #78c9c4;
+        --yellow: #d7b86a;
+        --red: #d97886;
       }
-
-      * {
-        box-sizing: border-box;
-      }
-
+      * { box-sizing: border-box; }
       body {
-        margin: 0;
-        min-height: 100vh;
-        display: grid;
-        place-items: center;
-        padding: 24px;
-        background:
-          radial-gradient(circle at 15% 15%, rgba(59, 130, 246, 0.22), transparent 34%),
-          radial-gradient(circle at 85% 80%, rgba(14, 165, 233, 0.16), transparent 32%),
-          #0b1020;
+        margin: 0; min-height: 100vh; color: var(--text);
+        font: 14px/1.5 Inter, ui-sans-serif, system-ui, sans-serif;
+        background: var(--bg);
       }
-
-      main {
-        width: min(100%, 680px);
-        padding: clamp(32px, 7vw, 72px);
-        border: 1px solid rgba(148, 163, 184, 0.22);
-        border-radius: 24px;
-        background: rgba(15, 23, 42, 0.82);
-        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.3);
-        text-align: center;
-      }
-
-      .badge {
-        display: inline-block;
-        margin-bottom: 24px;
-        padding: 7px 12px;
-        border-radius: 999px;
-        color: #bae6fd;
-        background: rgba(14, 165, 233, 0.14);
-        font-size: 0.78rem;
-        font-weight: 700;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-      }
-
-      h1 {
-        margin: 0;
-        font-size: clamp(2rem, 6vw, 3.5rem);
-        line-height: 1.05;
-        letter-spacing: -0.04em;
-      }
-
-      p {
-        max-width: 480px;
-        margin: 20px auto 0;
-        color: #b8c3d9;
-        font-size: 1.08rem;
-        line-height: 1.7;
-      }
-
-      footer {
-        margin-top: 36px;
-        color: #71809d;
-        font-size: 0.85rem;
+      .shell { width: min(1500px, calc(100% - 32px)); margin: 0 auto; padding: 34px 0 52px; }
+      header { display: flex; justify-content: space-between; gap: 20px; align-items: end; margin-bottom: 28px; }
+      .eyebrow { color: var(--cyan); letter-spacing: .14em; text-transform: uppercase; font-weight: 800; font-size: 11px; }
+      h1 { margin: 7px 0 6px; font-size: clamp(2rem, 5vw, 3.8rem); line-height: 1; letter-spacing: -.06em; }
+      .subtitle, .updated { color: var(--muted); }
+      .status { padding: 9px 13px; border: 1px solid var(--line); border-radius: 999px; white-space: nowrap; color: var(--cyan); background: #151b1b; }
+      .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 24px; }
+      .stat, .panel { border: 1px solid var(--line); border-radius: 18px; background: var(--panel); box-shadow: none; }
+      .stat { padding: 18px 20px; }
+      .stat strong { display: block; font-size: 2rem; letter-spacing: -.05em; }
+      .stat span { color: var(--muted); font-size: 12px; }
+      .grid { display: grid; grid-template-columns: 1.3fr .9fr; gap: 20px; }
+      .panel { overflow: hidden; }
+      .panel-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 20px 22px 15px; border-bottom: 1px solid var(--line); }
+      h2 { margin: 0; font-size: 1.05rem; }
+      h3 { margin: 0; font-size: .9rem; }
+      .priority-section + .priority-section { border-top: 1px solid var(--line); }
+      .priority-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 16px 18px 8px; }
+      .hint { color: var(--muted); font-size: 12px; }
+      .table-wrap { overflow-x: auto; }
+      table { width: 100%; border-collapse: collapse; min-width: 610px; }
+      th, td { padding: 13px 18px; text-align: left; border-bottom: 1px solid rgba(148,163,184,.1); }
+      th { color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+      tbody tr:hover { background: var(--panel-raised); }
+      .rate { color: var(--yellow); font-weight: 800; font-size: 1.05rem; }
+      .player { font-weight: 750; }
+      .sub { color: var(--muted); font-size: 12px; }
+      .score { color: var(--cyan); font-weight: 800; }
+      .empty { color: var(--muted); padding: 28px 20px; }
+      footer { color: var(--muted); margin-top: 20px; font-size: 12px; }
+      @media (max-width: 850px) {
+        header { align-items: start; flex-direction: column; }
+        .grid, .stats { grid-template-columns: 1fr; }
       }
     </style>
   </head>
   <body>
-    <main>
-      <div class="badge">Live monitoring service</div>
-      <h1>AR BET Live Score Alert</h1>
-      <p>
-        This service monitors live soccer markets and sends configured score alerts
-        through Telegram.
-      </p>
-      <footer>Service is configured and running.</footer>
+    <main class="shell">
+      <header>
+        <div>
+          <div class="eyebrow">AR BET / live intelligence</div>
+          <h1>Player scoring monitor</h1>
+          <div class="subtitle">Current player-to-score rates and enriched safety signals.</div>
+        </div>
+        <div class="status" id="status">Connecting…</div>
+      </header>
+      <section class="stats" aria-label="Dashboard summary">
+        <div class="stat"><strong id="market-count">—</strong><span>live scoring markets</span></div>
+        <div class="stat"><strong id="top-rate">—</strong><span>highest current rate</span></div>
+        <div class="stat"><strong id="player-count">—</strong><span>enriched players</span></div>
+      </section>
+      <section class="grid">
+        <article class="panel">
+          <div class="panel-head"><h2>Current rates</h2><span class="hint">highest first</span></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Player / match</th><th>Rate</th><th>Market</th><th>Time</th></tr></thead>
+              <tbody id="markets"><tr><td class="empty" colspan="4">Waiting for the first scan…</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="panel-head"><h2>Player priority lists</h2><span class="hint">lower score is safer</span></div>
+          <div class="priority-section">
+            <div class="priority-heading">
+              <h3>Goals-based safe score list</h3>
+              <span class="hint">legacy ranking</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Player</th><th>Safe score</th><th>Goals / matches</th></tr></thead>
+                <tbody id="goals-players"><tr><td class="empty" colspan="3">Stats appear after enrichment…</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="priority-section">
+            <div class="priority-heading">
+              <h3>AI-based list for safe players</h3>
+              <span class="hint">multi-factor ranking</span>
+            </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Player</th><th>AI score</th><th>Season</th><th>Profile</th></tr></thead>
+              <tbody id="players"><tr><td class="empty" colspan="4">Stats appear after enrichment…</td></tr></tbody>
+            </table>
+          </div>
+          </div>
+        </article>
+      </section>
+      <footer id="updated">The dashboard uses local bot data only. It does not expose Telegram credentials.</footer>
     </main>
+    <script>
+      const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;',
+      }[character]));
+      const formatRate = (value) => Number(value).toFixed(1);
+      function render(state) {
+        const markets = state.markets || [];
+        const players = state.players || [];
+        document.querySelector('#market-count').textContent = markets.length;
+        document.querySelector('#player-count').textContent = players.length;
+        document.querySelector('#top-rate').textContent = markets.length ? formatRate(markets[0].yesRate) : '—';
+        document.querySelector('#status').textContent = state.updatedAt ? '● Live' : 'Waiting';
+        document.querySelector('#markets').innerHTML = markets.length ? markets.map((market) => `
+          <tr>
+            <td><div class="player">${escapeHtml(market.player)}</div><div class="sub">${escapeHtml(market.league)} · ${escapeHtml(market.event)}</div></td>
+            <td class="rate">${formatRate(market.yesRate)}</td>
+            <td class="sub">${escapeHtml(market.market)}</td>
+            <td class="sub">${escapeHtml(market.gameTime)}</td>
+          </tr>`).join('') : '<tr><td class="empty" colspan="4">No live scoring markets found.</td></tr>';
+        const goalsRanked = [...players].sort((left, right) => left.goalsPerMatch - right.goalsPerMatch || left.name.localeCompare(right.name));
+        const goalsBody = document.querySelector('#goals-players');
+        goalsBody.innerHTML = goalsRanked.length ? goalsRanked.map((player) => `
+          <tr>
+            <td><div class="player">${escapeHtml(player.name)}</div><div class="sub">${escapeHtml(player.position)}</div></td>
+            <td class="score">${Number(player.goalsPerMatch).toFixed(2)}</td>
+            <td class="sub">Total: ${Number(player.totalGoals)} goals / ${Number(player.totalMatches)} matches<br>${Number(player.currentSeasonGoals)}/${Number(player.currentSeasonAppearances)} season</td>
+          </tr>`).join('') : '<tr><td class="empty" colspan="3">No player stats yet.</td></tr>';
+        document.querySelector('#players').innerHTML = players.length ? players.map((player) => `
+          <tr>
+            <td><div class="player">${escapeHtml(player.name)}</div><div class="sub">${escapeHtml(player.position)} · ${player.heightM ? `${Number(player.heightM).toFixed(2)}m` : 'height n/a'}</div></td>
+            <td class="score">${Number(player.aiSafetyScore).toFixed(1)}</td>
+            <td class="sub">${player.currentSeasonGoals}/${player.currentSeasonAppearances} goals<br>${player.recentGoals}/${player.recentAppearances} recent</td>
+            <td class="sub">${player.shots}/${player.shotsOnTarget} shots<br>${player.currentClubGoals}/${player.currentClubAppearances} club</td>
+          </tr>`).join('') : '<tr><td class="empty" colspan="4">No player stats yet.</td></tr>';
+        document.querySelector('#updated').textContent = state.updatedAt
+          ? `Last scan: ${new Date(state.updatedAt).toLocaleString()} · Higher rates are prioritised.`
+          : 'Waiting for the first bot scan…';
+      }
+      async function refresh() {
+        try {
+          const response = await fetch('/api/state', { cache: 'no-store' });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          render(await response.json());
+        } catch (error) {
+          document.querySelector('#status').textContent = 'Offline';
+          document.querySelector('#updated').textContent = `Dashboard connection failed: ${error.message}`;
+        }
+      }
+      refresh();
+      setInterval(refresh, 5000);
+    </script>
   </body>
 </html>

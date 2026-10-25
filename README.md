@@ -7,9 +7,25 @@ the main bot, while the player's Transfermarkt club-by-club matches and goals,
 totals, and profile link are sent through an optional separate bot. A player's
 stats are sent only once per monitor process, even if the player appears in
 multiple alerts. After each new player stats message, the stats bot sends an
-updated session safety list sorted by goals per match, with lower values first.
+updated session list with both the legacy **Goals-based safe score list**
+(sorted by goals per match, lower values first) and an **AI-based list for safe
+players** (lower score first). The AI-based score combines all-time,
+latest-season, current-club, and recent goals per appearance; shots and shots
+on target; penalty involvement; position; height; and the current season's
+team and opponent goal context. It is a transparent heuristic, not a trained
+prediction model. Data that Transfermarkt does not provide, such as expected
+minutes, corner assignment, headed-goal splits, xG, lineups, possession,
+corners, and live score state, is not fabricated and contributes no score
+adjustment. The message includes the available figures used by the ranking.
+When an enriched qualifying player is identified as a goalkeeper, the main
+alert bot also sends a **Goalkeeper alert** each time that qualifying alert is
+processed. Duplicate goalkeeper alerts are intentionally allowed. This is
+informational because goalkeeper goals are rare but can occur through
+penalties or unusual late-game situations.
 When a live match ends or its target player market disappears, that player's
-entry is removed from the list and the updated list is sent.
+entry is retained for 10 minutes from the last rates fetch. It is removed only
+if the player is still absent after that retention window, and the updated
+list is sent.
 The list lasts for the monitor process session and starts over when the process
 restarts. If Transfermarkt is unavailable, the alert still sends and the stats
 bot retries that player on a later qualifying alert.
@@ -45,6 +61,12 @@ bot retries that player on a later qualifying alert.
    ```powershell
    npm start
    ```
+
+6. Open the local dashboard at `http://127.0.0.1:3000`. It refreshes every
+   five seconds, lists current player-to-score rates above the configured
+   `YES_RATE_THRESHOLD` with the highest rates first, and shows enriched player
+   statistics and AI safety scores. Change `DASHBOARD_PORT` in `.env` if port
+   3000 is unavailable.
 
 ## Notes
 

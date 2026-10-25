@@ -1,5 +1,9 @@
 import 'dotenv/config';
 import { chromium } from 'playwright';
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
 const required = ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID'];
 const missing = required.filter((key) => !process.env[key]);
@@ -12,7 +16,83 @@ const threshold = Number(process.env.YES_RATE_THRESHOLD || 40);
 const intervalMs = Math.max(15, Number(process.env.CHECK_INTERVAL_SECONDS || 45)) * 1000;
 const once = process.argv.includes('--once');
 const defaultWindowsEdge = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+const dashboardPort = Number(process.env.DASHBOARD_PORT || 3000);
+const dashboardPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'index.html');
 let stopRequested = false;
+let dashboardState = {
+  updatedAt: null,
+  threshold,
+  markets: [],
+  players: [],
+};
+
+function publishDashboard(markets) {
+  dashboardState = {
+    updatedAt: new Date().toISOString(),
+    threshold,
+    markets: markets
+      .filter((market) => market.yesRate > threshold)
+      .sort((left, right) => right.yesRate - left.yesRate)
+      .map((market) => ({
+        event: market.event,
+        league: market.league,
+        market: market.market,
+        player: market.player || 'Unknown player',
+        yesRate: market.yesRate,
+        gameTime: market.gameTime || 'Unavailable',
+      })),
+    players: [...sessionPlayers.values()]
+      .sort((left, right) => left.aiSafetyScore - right.aiSafetyScore)
+      .map((player) => ({
+        name: player.name,
+        aiSafetyScore: player.aiSafetyScore,
+        goalsPerMatch: player.goalsPerMatch,
+        currentSeasonGoals: player.currentSeasonGoals,
+        currentSeasonAppearances: player.currentSeasonAppearances,
+        currentClubGoals: player.currentClubGoals,
+        currentClubAppearances: player.currentClubAppearances,
+        recentGoals: player.recentGoals,
+        recentAppearances: player.recentAppearances,
+        shots: player.shots,
+        shotsOnTarget: player.shotsOnTarget,
+        position: player.position,
+        heightM: player.heightM,
+      })),
+  };
+}
+
+function startDashboardServer() {
+  const server = createServer(async (request, response) => {
+    try {
+      if (request.url === '/api/state') {
+        response.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        });
+        response.end(JSON.stringify(dashboardState));
+        return;
+      }
+      if (request.url === '/' || request.url === '/index.html') {
+        response.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store, no-cache, must-revalidate',
+          pragma: 'no-cache',
+        });
+        response.end(await readFile(dashboardPath));
+        return;
+      }
+      response.writeHead(404);
+      response.end('Not found');
+    } catch (error) {
+      response.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+      response.end(`Dashboard error: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+  server.listen(dashboardPort, '127.0.0.1', () => {
+    console.log(`[${new Date().toISOString()}] Dashboard available at http://127.0.0.1:${dashboardPort}`);
+  });
+  return server;
+}
 
 async function dismissPopups(page) {
   const actions = [
@@ -288,6 +368,7 @@ const TRANSFERMARKT_API_URL = 'https://tmapi.transfermarkt.technology';
 const sentPlayerStats = new Set();
 const playerStatsInFlight = new Map();
 const sessionPlayers = new Map();
+const playerRetentionMs = 10 * 60 * 1000;
 
 function normalizePlayerName(value) {
   return value
@@ -338,8 +419,12 @@ async function findTransfermarktPlayer(name) {
         const profileName = profile?.name;
         const relativeUrl = profile?.relativeUrl;
         return profileName && relativeUrl
-          ? { name: profileName, url: new URL(relativeUrl, TRANSFERMARKT_BASE_URL).href }
-          : null;
+        ? {
+          name: profileName,
+          url: new URL(relativeUrl, TRANSFERMARKT_BASE_URL).href,
+          profile,
+        }
+        : null;
       }));
       candidates.push(...profiles.filter(Boolean));
       if (candidates.length) break;
@@ -394,6 +479,7 @@ async function getTransfermarktInfo(name) {
   const player = await findTransfermarktPlayer(name);
   const playerId = player.url.match(/\/spieler\/(\d+)/)?.[1];
   if (!playerId) throw new Error('Transfermarkt returned an invalid player profile');
+  const profile = player.profile || await transfermarktApiJson(`/player/${playerId}`);
   const performanceResponse = await transfermarktRequest(
     TRANSFERMARKT_API_URL,
     `/player/${playerId}/performance-game`,
@@ -403,6 +489,11 @@ async function getTransfermarktInfo(name) {
   if (!Array.isArray(records)) throw new Error('Transfermarkt returned no performance data');
 
   const totals = new Map();
+  const seasonTotals = new Map();
+  const recentRecords = [];
+  let latestSeasonId = -Infinity;
+  let latestSeasonLabel = null;
+  let latestClubId = null;
   for (const record of records) {
     const general = record?.clubsInformation && record?.statistics?.generalStatistics;
     const goals = record?.statistics?.goalStatistics;
@@ -410,10 +501,54 @@ async function getTransfermarktInfo(name) {
     if (!general || !goals || !club || (general.participationState !== undefined && general.participationState !== 'played')) continue;
     const clubId = String(general.primaryClubId || club.clubId || '');
     if (!clubId) continue;
-    const total = totals.get(clubId) || { appearances: 0, goals: 0, name: club.name || `Club ${clubId}` };
+    const total = totals.get(clubId) || {
+      clubId,
+      appearances: 0,
+      goals: 0,
+      name: club.name || `Club ${clubId}`,
+    };
     total.appearances += 1;
     total.goals += Number(goals.goalsScoredTotalOfficial || goals.goalsScoredTotal || 0);
+    total.shots = (total.shots || 0) + Number(goals.scoringAttempts || 0);
+    total.shotsOnTarget = (total.shotsOnTarget || 0) + Number(goals.scoringAttemptsOnGoal || 0);
+    total.penaltyAttempts = (total.penaltyAttempts || 0) + Number(goals.penaltyShooterAttempts || 0);
+    total.penaltyGoals = (total.penaltyGoals || 0) + Number(goals.penaltyShooterGoalsScored || 0);
     totals.set(clubId, total);
+
+    const season = record?.gameInformation?.season;
+    const seasonId = Number(record?.gameInformation?.seasonId ?? season?.id);
+    if (Number.isFinite(seasonId)) {
+      const seasonKey = `${seasonId}:${clubId}`;
+      const seasonTotal = seasonTotals.get(seasonKey) || {
+        seasonId,
+        seasonLabel: season?.display || String(seasonId),
+        clubId,
+        appearances: 0,
+        goals: 0,
+        shots: 0,
+        shotsOnTarget: 0,
+        penaltyAttempts: 0,
+        penaltyGoals: 0,
+        teamGoals: 0,
+        opponentGoals: 0,
+        name: total.name,
+      };
+      seasonTotal.appearances += 1;
+      seasonTotal.goals += Number(goals.goalsScoredTotalOfficial || goals.goalsScoredTotal || 0);
+      seasonTotal.shots += Number(goals.scoringAttempts || 0);
+      seasonTotal.shotsOnTarget += Number(goals.scoringAttemptsOnGoal || 0);
+      seasonTotal.penaltyAttempts += Number(goals.penaltyShooterAttempts || 0);
+      seasonTotal.penaltyGoals += Number(goals.penaltyShooterGoalsScored || 0);
+      seasonTotal.teamGoals += Number(record?.clubsInformation?.club?.goalsTotal || 0);
+      seasonTotal.opponentGoals += Number(record?.clubsInformation?.opponent?.goalsTotal || 0);
+      seasonTotals.set(seasonKey, seasonTotal);
+      recentRecords.push({ seasonId, goals, gameInformation: record.gameInformation });
+      if (seasonId > latestSeasonId) {
+        latestSeasonId = seasonId;
+        latestSeasonLabel = seasonTotal.seasonLabel;
+      }
+      if (seasonId === latestSeasonId) latestClubId = clubId;
+    }
   }
   if (!totals.size) throw new Error('Transfermarkt returned no club totals');
 
@@ -425,7 +560,50 @@ async function getTransfermarktInfo(name) {
   }));
   const appearances = clubs.reduce((sum, club) => sum + club.appearances, 0);
   const goals = clubs.reduce((sum, club) => sum + club.goals, 0);
-  return { player, clubs, appearances, goals };
+  const currentAssignment = (profile?.clubAssignments || []).find((assignment) => assignment?.type === 'current');
+  const currentClubId = String(currentAssignment?.clubId || latestClubId || '');
+  const currentSeasonStats = [...seasonTotals.values()]
+    .filter((stats) => stats.seasonId === latestSeasonId);
+  const currentClubSeasonStats = currentSeasonStats.find((stats) => stats.clubId === currentClubId)
+    || currentSeasonStats[0]
+    || { appearances: 0, goals: 0, name: 'Unavailable' };
+  const currentClub = clubs.find((club) => String(club.clubId || '') === currentClubId)
+    || currentClubSeasonStats;
+  const recent = recentRecords
+    .filter((record) => record.seasonId === latestSeasonId)
+    .slice(0, 10)
+    .reduce((summary, record) => ({
+      appearances: summary.appearances + 1,
+      goals: summary.goals + Number(record.goals.goalsScoredTotalOfficial || record.goals.goalsScoredTotal || 0),
+      shots: summary.shots + Number(record.goals.scoringAttempts || 0),
+      shotsOnTarget: summary.shotsOnTarget + Number(record.goals.scoringAttemptsOnGoal || 0),
+    }), { appearances: 0, goals: 0, shots: 0, shotsOnTarget: 0 });
+  const attributes = profile?.attributes || {};
+  return {
+    player,
+    clubs,
+    appearances,
+    goals,
+    currentSeason: {
+      label: latestSeasonLabel || 'Unavailable',
+      appearances: currentClubSeasonStats.appearances,
+      goals: currentClubSeasonStats.goals,
+      shots: currentClubSeasonStats.shots || 0,
+      shotsOnTarget: currentClubSeasonStats.shotsOnTarget || 0,
+      penaltyAttempts: currentClubSeasonStats.penaltyAttempts || 0,
+      penaltyGoals: currentClubSeasonStats.penaltyGoals || 0,
+      teamGoals: currentClubSeasonStats.teamGoals || 0,
+      opponentGoals: currentClubSeasonStats.opponentGoals || 0,
+    },
+    recent,
+    currentClub: {
+      name: currentClub.name || 'Unavailable',
+      appearances: currentClubSeasonStats.appearances,
+      goals: currentClubSeasonStats.goals,
+    },
+    heightM: Number.isFinite(Number(attributes.height)) ? Number(attributes.height) : null,
+    positionGroup: attributes.positionGroupName || attributes.positionGroup || 'Unknown',
+  };
 }
 
 function formatTransfermarktInfo(info) {
@@ -434,22 +612,94 @@ function formatTransfermarktInfo(info) {
     ...info.clubs.map((club) => `- ${club.name}: ${club.appearances} matches, ${club.goals} goals`),
     `Total Matches: ${info.appearances}`,
     `Total Goals: ${info.goals}`,
+    `Current club/season: ${info.currentClub.name}, ${info.currentSeason.label}`,
+    `Current club season: ${info.currentClub.appearances} matches, ${info.currentClub.goals} goals`,
+    `Position: ${info.positionGroup}`,
+    `Height: ${info.heightM === null ? 'Unavailable' : `${info.heightM.toFixed(2)} m`}`,
     `Profile: ${info.player.url}`,
   ].join('\n');
 }
 
+function ratio(goals, appearances) {
+  return appearances ? goals / appearances : 0;
+}
+
+function calculateAiSafetyScore(info) {
+  const allTimeRate = ratio(info.goals, info.appearances);
+  const seasonRate = ratio(info.currentSeason.goals, info.currentSeason.appearances);
+  const clubRate = ratio(info.currentClub.goals, info.currentClub.appearances);
+  const recentRate = ratio(info.recent.goals, info.recent.appearances);
+  const shotsRate = ratio(info.currentSeason.shots, info.currentSeason.appearances);
+  const onTargetRate = ratio(info.currentSeason.shotsOnTarget, info.currentSeason.appearances);
+  const evidence = Math.min(1, info.appearances / 20);
+  const scoringRate = (
+    allTimeRate * 0.30
+    + seasonRate * 0.25
+    + clubRate * 0.20
+    + recentRate * 0.15
+    + shotsRate * 0.05
+    + onTargetRate * 0.05
+  ) * evidence;
+  const position = info.positionGroup.toLowerCase();
+  let roleAdjustment = 0;
+  if (position.includes('forward') || position.includes('striker')) roleAdjustment = 12;
+  else if (position.includes('midfield')) roleAdjustment = 5;
+  else if (position.includes('goalkeeper')) roleAdjustment = -10;
+  else if (position.includes('defen')) roleAdjustment = -5;
+  const heightAdjustment = position.includes('defen') && info.heightM !== null
+    ? Math.max(0, (info.heightM - 1.80) * 25)
+    : 0;
+  const penaltyAdjustment = info.currentSeason.penaltyAttempts > 0 ? 10 : 0;
+  const setPieceAdjustment = position.includes('defen')
+    ? Math.min(8, info.currentSeason.shotsOnTarget * 0.5)
+    : 0;
+  const teamStrengthAdjustment = info.currentSeason.appearances
+    ? Math.max(-3, Math.min(5, (info.currentSeason.teamGoals / info.currentSeason.appearances - 1.2) * 3))
+    : 0;
+  const opponentAdjustment = info.currentSeason.appearances
+    ? Math.max(-3, Math.min(3, (info.currentSeason.opponentGoals / info.currentSeason.appearances - 1.2) * 2))
+    : 0;
+  return Math.max(0, Math.min(
+    100,
+    scoringRate * 100
+      + roleAdjustment
+      + heightAdjustment
+      + penaltyAdjustment
+      + setPieceAdjustment
+      + teamStrengthAdjustment
+      + opponentAdjustment,
+  ));
+}
+
 function formatSessionPlayerList() {
-  const players = [...sessionPlayers.values()]
+  const players = [...sessionPlayers.values()];
+  const goalsRanked = [...players]
     .sort((left, right) =>
       left.goalsPerMatch - right.goalsPerMatch
       || left.name.localeCompare(right.name),
     );
+  const aiRanked = [...players]
+    .sort((left, right) =>
+      left.aiSafetyScore - right.aiSafetyScore
+      || left.name.localeCompare(right.name),
+    );
   return [
-    'Transfermarkt player safety list',
-    'Lower goals per match = safer',
-    ...players.map((player, index) =>
+    'Goals-based safe score list',
+    'Legacy ranking: lower goals per match = safer',
+    ...goalsRanked.map((player, index) =>
       `${index + 1}. ${player.name} - Safe score: ${player.goalsPerMatch.toFixed(2)}`
       + ` (goals per match: ${player.goalsPerMatch.toFixed(2)})`,
+    ),
+    '',
+    'AI-based list for safe players',
+    'Lower AI score = safer; includes scoring, recent shots, penalties, role, height and team context',
+    ...aiRanked.map((player, index) =>
+      `${index + 1}. ${player.name} - AI safety score: ${player.aiSafetyScore.toFixed(1)}`
+      + ` (season: ${player.currentSeasonGoals}/${player.currentSeasonAppearances},`
+      + ` club: ${player.currentClubGoals}/${player.currentClubAppearances},`
+      + ` recent: ${player.recentGoals}/${player.recentAppearances},`
+      + ` shots: ${player.shots}/${player.shotsOnTarget},`
+      + ` position: ${player.position}, height: ${player.heightM === null ? 'n/a' : `${player.heightM.toFixed(2)}m`})`,
     ),
   ].join('\n');
 }
@@ -471,6 +721,7 @@ async function sendSessionPlayerList() {
 }
 
 function updateSessionPlayers(activeMarkets, liveEventIds) {
+  const now = Date.now();
   const activePlayers = new Map();
   for (const market of activeMarkets) {
     if (!market.player) continue;
@@ -482,14 +733,18 @@ function updateSessionPlayers(activeMarkets, liveEventIds) {
 
   let changed = false;
   for (const [key, player] of sessionPlayers) {
+    if (!Number.isFinite(player.lastSeenAt)) player.lastSeenAt = now;
     const eventIds = activePlayers.get(key);
     const stillActive = eventIds && [...eventIds].some((eventId) => liveEventIds.has(eventId));
     if (!stillActive) {
-      sessionPlayers.delete(key);
-      changed = true;
+      if (now - player.lastSeenAt >= playerRetentionMs) {
+        sessionPlayers.delete(key);
+        changed = true;
+      }
       continue;
     }
     player.eventIds = eventIds;
+    player.lastSeenAt = now;
   }
   return changed;
 }
@@ -509,11 +764,6 @@ async function sendPlayerStatsOnce(player, eventId) {
       .split(',')
       .map((id) => id.trim())
       .filter(Boolean);
-    if (!token || !chatIds.length) {
-      console.warn(`[${new Date().toISOString()}] Transfermarkt bot is not configured; stats were not sent for ${player}.`);
-      return false;
-    }
-
     let timeoutId;
     try {
       const lookup = getTransfermarktInfo(player);
@@ -523,18 +773,45 @@ async function sendPlayerStatsOnce(player, eventId) {
           timeoutId = setTimeout(() => reject(new Error('lookup timed out')), 15_000);
         }),
       ]);
-      await sendTelegramMessage(
-        token,
-        chatIds,
-        formatTransfermarktInfo(info),
-        'Transfermarkt stats bot',
-      );
+      if (info.positionGroup.toLowerCase().includes('goalkeeper')) {
+        await sendTelegram([
+          '🧤 Goalkeeper alert',
+          `Player: ${info.player.name}`,
+          `Position: ${info.positionGroup}`,
+          'Goalkeepers have an exceptionally low normal scoring rate, but penalties and rare late-game situations can change the risk.',
+        ].join('\n'));
+      }
+      if (token && chatIds.length) {
+        await sendTelegramMessage(
+          token,
+          chatIds,
+          formatTransfermarktInfo(info),
+          'Transfermarkt stats bot',
+        );
+      } else {
+        console.warn(`[${new Date().toISOString()}] Transfermarkt bot is not configured; stats were loaded for the dashboard only.`);
+      }
       sentPlayerStats.add(key);
       sessionPlayers.set(key, {
         name: info.player.name,
+        totalMatches: info.appearances,
+        totalGoals: info.goals,
         goalsPerMatch: info.appearances ? info.goals / info.appearances : 0,
+        aiSafetyScore: calculateAiSafetyScore(info),
+        currentSeasonGoals: info.currentSeason.goals,
+        currentSeasonAppearances: info.currentSeason.appearances,
+        currentClubGoals: info.currentClub.goals,
+        currentClubAppearances: info.currentClub.appearances,
+        recentGoals: info.recent.goals,
+        recentAppearances: info.recent.appearances,
+        shots: info.currentSeason.shots,
+        shotsOnTarget: info.currentSeason.shotsOnTarget,
+        position: info.positionGroup,
+        heightM: info.heightM,
+        lastSeenAt: Date.now(),
         eventIds: eventId ? new Set([eventId]) : new Set(),
       });
+      publishDashboard(dashboardState.markets);
       await sendSessionPlayerList();
       return true;
     } catch (error) {
@@ -727,6 +1004,7 @@ async function check(page) {
       console.warn(`[${new Date().toISOString()}] Updated Transfermarkt safety list failed: ${reason}`);
     }
   }
+  publishDashboard(markets);
   let alerts = 0;
 
   for (const market of markets) {
@@ -750,6 +1028,7 @@ async function main() {
   // Use the locally installed Edge on Windows so this works without Playwright
   // having to download its own browser. ARBET_BROWSER_PATH can override this.
   const executablePath = process.env.ARBET_BROWSER_PATH || (process.platform === 'win32' ? defaultWindowsEdge : undefined);
+  const dashboardServer = startDashboardServer();
   const browser = await chromium.launch({
     headless: process.env.HEADLESS !== 'false',
     executablePath,
@@ -780,6 +1059,7 @@ async function main() {
     } while (!once && !stopRequested);
   } finally {
     await browser.close();
+    dashboardServer.close();
   }
 }
 
