@@ -20,10 +20,12 @@ const dashboardPort = Number(process.env.DASHBOARD_PORT || 3000);
 const dashboardPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'index.html');
 const targetMarket = 'To score (incl. overtime)';
 const targetMarkets = [targetMarket];
+const liveMatchRetentionMs = 10 * 60 * 1000;
 let stopRequested = false;
 let dashboardAlerts = [];
 let dashboardLiveMatches = [];
 let dashboardMarkets = [];
+const retainedLiveMatches = new Map();
 let dashboardState = {
   updatedAt: null,
   threshold,
@@ -79,6 +81,40 @@ function publishDashboard(markets = dashboardMarkets, alerts = dashboardAlerts, 
         heightM: player.heightM,
       })),
   };
+}
+
+function retainLiveMatches(currentMatches, discoveredEventIds) {
+  const now = Date.now();
+  const currentByEvent = new Map(currentMatches.map((match) => [match.eventId, match]));
+
+  for (const [eventId, match] of currentByEvent) {
+    const previous = retainedLiveMatches.get(eventId);
+    retainedLiveMatches.set(eventId, {
+      ...match,
+      player: match.player || previous?.player || null,
+      lastSeenAt: now,
+    });
+  }
+
+  for (const [eventId, previous] of retainedLiveMatches) {
+    if (currentByEvent.has(eventId)) continue;
+    if (discoveredEventIds.has(eventId)) {
+      retainedLiveMatches.set(eventId, {
+        ...previous,
+        yesRate: null,
+        marketAvailable: false,
+        lastSeenAt: now,
+      });
+      continue;
+    }
+    if (now - previous.lastSeenAt >= liveMatchRetentionMs) {
+      retainedLiveMatches.delete(eventId);
+    }
+  }
+
+  return [...retainedLiveMatches.values()]
+    .sort((left, right) => (right.yesRate ?? -Infinity) - (left.yesRate ?? -Infinity))
+    .map(({ lastSeenAt, ...match }) => match);
 }
 
 function startDashboardServer() {
@@ -1007,11 +1043,16 @@ async function check(page) {
     const teams = event.split(' vs ');
     const league = findLeague(overviewText, teams);
     const gameTime = findMatchClock(overviewText, teams);
+    const highestRate = candidates.reduce((highest, candidate) =>
+      !highest || candidate.yesRate > highest.yesRate ? candidate : highest, null);
     liveMatches.push({
       eventId,
       event: event || `Match ${numericId}`,
       league,
       gameTime,
+      player: highestRate?.player || null,
+      yesRate: highestRate?.yesRate ?? null,
+      marketAvailable: Boolean(highestRate),
     });
     const namedCandidates = candidates.map((candidate) => ({
       ...candidate,
@@ -1031,7 +1072,7 @@ async function check(page) {
       console.warn(`[${new Date().toISOString()}] Updated Transfermarkt safety list failed: ${reason}`);
     }
   }
-  dashboardLiveMatches = liveMatches;
+  dashboardLiveMatches = retainLiveMatches(liveMatches, new Set(discoveredEventIds));
   publishDashboard(markets, dashboardAlerts, dashboardLiveMatches);
   let alerts = 0;
   const scanAlerts = [];

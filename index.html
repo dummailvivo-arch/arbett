@@ -120,8 +120,8 @@
         <div class="panel-head"><h2>Live matches</h2><span class="hint" id="market-summary">Target markets: — · Live markets: —</span></div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Match</th><th>League</th><th>Game time</th></tr></thead>
-            <tbody id="live-matches"><tr><td class="empty" colspan="3">Waiting for the first scan…</td></tr></tbody>
+            <thead><tr><th>Match</th><th>Player</th><th>Max current rate</th><th>League</th><th>Game time</th></tr></thead>
+            <tbody id="live-matches"><tr><td class="empty" colspan="5">Waiting for the first scan…</td></tr></tbody>
           </table>
         </div>
       </section>
@@ -170,9 +170,11 @@
         document.querySelector('#live-matches').innerHTML = liveMatches.length ? liveMatches.map((match) => `
           <tr>
             <td><div class="player">${escapeHtml(match.event)}</div></td>
+            <td class="player">${escapeHtml(match.player || '—')}</td>
+            <td class="${match.yesRate == null ? 'sub' : 'rate'}">${match.yesRate == null ? 'No rate' : formatRate(match.yesRate)}</td>
             <td class="sub">${escapeHtml(match.league)}</td>
             <td class="sub">${escapeHtml(match.gameTime)}</td>
-          </tr>`).join('') : '<tr><td class="empty" colspan="3">No live matches found.</td></tr>';
+          </tr>`).join('') : '<tr><td class="empty" colspan="5">No live matches found.</td></tr>';
         document.querySelector('#alerts').innerHTML = alerts.length ? alerts.map((alert) => `
           <tr>
             <td><div class="player">${escapeHtml(alert.player)}</div><div class="sub">${escapeHtml(alert.league)} · ${escapeHtml(alert.event)}</div></td>

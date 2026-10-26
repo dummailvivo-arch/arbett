@@ -65,7 +65,11 @@ bot retries that player on a later qualifying alert.
 6. Open the local dashboard at `http://127.0.0.1:3000`. It refreshes every
    five seconds, lists current player-to-score rates above the configured
    `YES_RATE_THRESHOLD` with the highest rates first, and shows enriched player
-   statistics and AI safety scores. It also lists all live matches successfully
+   statistics and AI safety scores. The live-match list shows each match's
+   highest current target-market rate when that market is available, and
+   `No rate` otherwise. A match/player remains visible for up to 10 minutes
+   after it stops arriving in the live list, so a temporary zero-alert scan
+   does not clear the list. It also lists all live matches successfully
    discovered during the latest scan. The dashboard identifies the target
    `To score (incl. overtime)` market in a **Target markets available** label
    and separately reports the total target markets discovered and the live
