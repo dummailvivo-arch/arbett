@@ -65,8 +65,13 @@ bot retries that player on a later qualifying alert.
 6. Open the local dashboard at `http://127.0.0.1:3000`. It refreshes every
    five seconds, lists current player-to-score rates above the configured
    `YES_RATE_THRESHOLD` with the highest rates first, and shows enriched player
-   statistics and AI safety scores. Change `DASHBOARD_PORT` in `.env` if port
-   3000 is unavailable.
+   statistics and AI safety scores. It also lists all live matches successfully
+   discovered during the latest scan. The dashboard identifies the target
+   `To score (incl. overtime)` market in a **Target markets available** label
+   and separately reports the total target markets discovered and the live
+   markets above `YES_RATE_THRESHOLD`. It keeps the latest 50 qualifying alert
+   entries with their match, rate, market, and send time. Change
+   `DASHBOARD_PORT` in `.env` if port 3000 is unavailable.
 
 ## Notes
 

@@ -18,20 +18,38 @@ const once = process.argv.includes('--once');
 const defaultWindowsEdge = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const dashboardPort = Number(process.env.DASHBOARD_PORT || 3000);
 const dashboardPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'index.html');
+const targetMarket = 'To score (incl. overtime)';
+const targetMarkets = [targetMarket];
 let stopRequested = false;
+let dashboardAlerts = [];
+let dashboardLiveMatches = [];
+let dashboardMarkets = [];
 let dashboardState = {
   updatedAt: null,
   threshold,
+  targetMarket,
+  targetMarkets,
+  targetMarketCount: 0,
+  liveMarketCount: 0,
+  alerts: [],
+  liveMatches: [],
   markets: [],
   players: [],
 };
 
-function publishDashboard(markets) {
+function publishDashboard(markets = dashboardMarkets, alerts = dashboardAlerts, liveMatches = dashboardLiveMatches) {
+  dashboardMarkets = markets;
+  const liveMarkets = markets.filter((market) => market.yesRate > threshold);
   dashboardState = {
     updatedAt: new Date().toISOString(),
     threshold,
-    markets: markets
-      .filter((market) => market.yesRate > threshold)
+    targetMarket,
+    targetMarkets,
+    targetMarketCount: markets.length,
+    liveMarketCount: liveMarkets.length,
+    alerts,
+    liveMatches,
+    markets: liveMarkets
       .sort((left, right) => right.yesRate - left.yesRate)
       .map((market) => ({
         event: market.event,
@@ -45,6 +63,8 @@ function publishDashboard(markets) {
       .sort((left, right) => left.aiSafetyScore - right.aiSafetyScore)
       .map((player) => ({
         name: player.name,
+        totalMatches: player.totalMatches,
+        totalGoals: player.totalGoals,
         aiSafetyScore: player.aiSafetyScore,
         goalsPerMatch: player.goalsPerMatch,
         currentSeasonGoals: player.currentSeasonGoals,
@@ -201,7 +221,7 @@ function extractMarkets(bodyText) {
     const yesIndex = window.findIndex((line) => /^yes\b/i.test(line));
     if (yesIndex === -1) continue;
     const yesText = window.slice(yesIndex, yesIndex + 4).join(' ');
-    // AR BET's layouts can use either "Yes 41%" or "Yes 41".
+    // AR BET's layouts can use either "Yes 41%" or "Yes 41"
     const rate = yesText.match(/\byes\b[^\d]{0,24}(\d+(?:[.,]\d+)?)/i);
     if (!rate) continue;
 
@@ -811,7 +831,7 @@ async function sendPlayerStatsOnce(player, eventId) {
         lastSeenAt: Date.now(),
         eventIds: eventId ? new Set([eventId]) : new Set(),
       });
-      publishDashboard(dashboardState.markets);
+      publishDashboard();
       await sendSessionPlayerList();
       return true;
     } catch (error) {
@@ -975,6 +995,7 @@ async function check(page) {
     return [eventId, null, new Error(lastError)];
   }));
   const detailsByEvent = await detailsRequest;
+  const liveMatches = [];
   for (const [eventId, details, error] of detailsByEvent) {
     const numericId = eventId.split(':').at(-1);
     if (!details?.data?.list) {
@@ -986,6 +1007,12 @@ async function check(page) {
     const teams = event.split(' vs ');
     const league = findLeague(overviewText, teams);
     const gameTime = findMatchClock(overviewText, teams);
+    liveMatches.push({
+      eventId,
+      event: event || `Match ${numericId}`,
+      league,
+      gameTime,
+    });
     const namedCandidates = candidates.map((candidate) => ({
       ...candidate,
       eventId,
@@ -1004,8 +1031,10 @@ async function check(page) {
       console.warn(`[${new Date().toISOString()}] Updated Transfermarkt safety list failed: ${reason}`);
     }
   }
-  publishDashboard(markets);
+  dashboardLiveMatches = liveMatches;
+  publishDashboard(markets, dashboardAlerts, dashboardLiveMatches);
   let alerts = 0;
+  const scanAlerts = [];
 
   for (const market of markets) {
     if (!(market.yesRate > threshold)) continue;
@@ -1019,8 +1048,19 @@ async function check(page) {
       url,
     ].join('\n');
     await sendAlertWithPlayerStats(message, market.player, market.eventId);
+    scanAlerts.push({
+      event: market.event,
+      league: market.league,
+      market: market.market,
+      player: market.player || 'Unknown player',
+      yesRate: market.yesRate,
+      gameTime: market.gameTime || 'Unavailable',
+      sentAt: new Date().toISOString(),
+    });
     alerts += 1;
   }
+  dashboardAlerts = [...scanAlerts, ...dashboardAlerts].slice(0, 50);
+  publishDashboard(markets, dashboardAlerts);
   console.log(`[${new Date().toISOString()}] Scanned ${discoveredEventIds.length} live match page(s); found ${markets.length} target market(s); sent ${alerts} alert(s).`);
 }
 
